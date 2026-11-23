@@ -272,6 +272,11 @@ pub(super) fn render_expanded(
             endpoint: usize,
             entry: WorkspaceEntry,
         },
+        Group {
+            endpoint: usize,
+            name: String,
+            collapsed: bool,
+        },
     }
     let mut rows = Vec::new();
     for (endpoint_index, endpoint) in state.endpoints.iter().enumerate() {
@@ -282,12 +287,26 @@ pub(super) fn render_expanded(
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
             let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                 .unwrap_or(&empty_collapsed_groups);
+            // User-defined groups are a local-endpoint concept; remote
+            // machines keep the flat/worktree grouping behavior.
+            let groups: &[SpaceSidebarGroup] = if endpoint.endpoint_id.is_local() {
+                &config.spaces.groups
+            } else {
+                &[]
+            };
             rows.extend(
-                super::sidebar::workspace_entries(snapshot, collapsed_groups)
+                super::sidebar::sidebar_entries(snapshot, collapsed_groups, groups)
                     .into_iter()
-                    .map(|entry| Row::Workspace {
-                        endpoint: endpoint_index,
-                        entry,
+                    .map(|entry| match entry {
+                        SidebarEntry::Group { name, collapsed } => Row::Group {
+                            endpoint: endpoint_index,
+                            name,
+                            collapsed,
+                        },
+                        SidebarEntry::Workspace(entry) => Row::Workspace {
+                            endpoint: endpoint_index,
+                            entry,
+                        },
                     }),
             );
         }
@@ -304,7 +323,7 @@ pub(super) fn render_expanded(
     let row_heights = rows
         .iter()
         .map(|row| match row {
-            Row::Endpoint(_) => 1,
+            Row::Endpoint(_) | Row::Group { .. } => 1,
             Row::Workspace { endpoint, entry } => {
                 let endpoint = &state.endpoints[*endpoint];
                 let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
@@ -345,6 +364,27 @@ pub(super) fn render_expanded(
                     entry,
                 }),
             ) if endpoint == next_endpoint => u16::from(!entry.indented) * config.spaces.row_gap,
+            (
+                Row::Workspace { endpoint, .. },
+                Some(Row::Group {
+                    endpoint: next_endpoint,
+                    ..
+                }),
+            )
+            | (
+                Row::Group { endpoint, .. },
+                Some(Row::Group {
+                    endpoint: next_endpoint,
+                    ..
+                }),
+            ) if endpoint == next_endpoint => config.spaces.row_gap,
+            (
+                Row::Group { endpoint, .. },
+                Some(Row::Workspace {
+                    endpoint: next_endpoint,
+                    entry,
+                }),
+            ) if endpoint == next_endpoint => u16::from(!entry.indented) * config.spaces.row_gap,
             _ => 0,
         })
         .collect::<Vec<_>>();
@@ -372,7 +412,7 @@ pub(super) fn render_expanded(
                         }
                     })
             }
-            Row::Endpoint(_) => false,
+            Row::Endpoint(_) | Row::Group { .. } => false,
         });
         if let Some(selected_row) = selected_row {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
@@ -427,6 +467,44 @@ pub(super) fn render_expanded(
                         1,
                     ),
                     endpoint_id: endpoint.endpoint_id.clone(),
+                });
+                y = y
+                    .saturating_add(1)
+                    .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
+            }
+            Row::Group {
+                endpoint,
+                name,
+                collapsed,
+            } => {
+                if y >= body.bottom() {
+                    break;
+                }
+                let endpoint = &state.endpoints[*endpoint];
+                let rect = Rect::new(body.x, y, content_width, 1);
+                let marker = if *collapsed { "▸" } else { "▾" };
+                put_text(
+                    buffer,
+                    rect.x,
+                    rect.y,
+                    rect.width.saturating_sub(1),
+                    &format!(" {marker} {name}"),
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                );
+                if endpoint.status != ClientEndpointStatus::Online {
+                    buffer.set_style(
+                        rect,
+                        Style::default()
+                            .fg(palette.overlay0)
+                            .add_modifier(Modifier::DIM),
+                    );
+                }
+                hits.groups.push(GroupHit {
+                    rect,
+                    endpoint_id: endpoint.endpoint_id.clone(),
+                    key: super::sidebar::spaces_group_key(name),
                 });
                 y = y
                     .saturating_add(1)

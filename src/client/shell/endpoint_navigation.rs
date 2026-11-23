@@ -125,17 +125,22 @@ impl ClientShellState {
                         .snapshot
                         .as_deref()
                         .map_or_else(Vec::new, |snapshot| {
-                            render::workspace_entries(snapshot, &HashSet::new())
-                                .into_iter()
-                                .filter_map(|entry| {
-                                    snapshot.workspaces.get(entry.index).map(|workspace| {
-                                        (
-                                            endpoint.endpoint_id.clone(),
-                                            workspace.workspace_id.clone(),
-                                        )
-                                    })
+                            render::workspace_entries(
+                                snapshot,
+                                &HashSet::new(),
+                                if endpoint.endpoint_id.is_local() {
+                                    &self.config.spaces.groups
+                                } else {
+                                    &[]
+                                },
+                            )
+                            .into_iter()
+                            .filter_map(|entry| {
+                                snapshot.workspaces.get(entry.index).map(|workspace| {
+                                    (endpoint.endpoint_id.clone(), workspace.workspace_id.clone())
                                 })
-                                .collect()
+                            })
+                            .collect()
                         })
                 })
                 .collect::<Vec<_>>();

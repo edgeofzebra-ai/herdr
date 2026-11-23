@@ -226,7 +226,7 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let entries = sidebar_entries(snapshot, state.collapsed_groups, &config.spaces.groups);
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -238,8 +238,9 @@ pub(crate) fn render_sidebar(
     hits.workspace_body = body;
     let row_heights = entries
         .iter()
-        .map(|entry| {
-            snapshot
+        .map(|entry| match entry {
+            SidebarEntry::Group { .. } => 1,
+            SidebarEntry::Workspace(entry) => snapshot
                 .workspaces
                 .get(entry.index)
                 .map(|workspace| {
@@ -253,17 +254,13 @@ pub(crate) fn render_sidebar(
                     .max(1)
                     .min(u16::MAX as usize) as u16
                 })
-                .unwrap_or(1)
+                .unwrap_or(1),
         })
         .collect::<Vec<_>>();
     let gaps = entries
         .iter()
         .enumerate()
-        .map(|(index, _)| {
-            entries
-                .get(index + 1)
-                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
-        })
+        .map(|(index, _)| sidebar_entry_gap(entries.get(index + 1), config.spaces.row_gap))
         .collect::<Vec<_>>();
     let mut metrics = super::scroll::list_scroll_metrics(
         &row_heights,
@@ -272,10 +269,13 @@ pub(crate) fn render_sidebar(
         *state.workspace_scroll,
     );
     if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
-        if let Some(target) = entries
-            .iter()
-            .position(|entry| snapshot.workspaces[entry.index].focused)
-        {
+        if let Some(target) = entries.iter().position(|entry| match entry {
+            SidebarEntry::Group { .. } => false,
+            SidebarEntry::Workspace(entry) => snapshot
+                .workspaces
+                .get(entry.index)
+                .is_some_and(|workspace| workspace.focused),
+        }) {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
                 &row_heights,
                 &gaps,
@@ -300,6 +300,34 @@ pub(crate) fn render_sidebar(
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
     for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
+        let gap = sidebar_entry_gap(entries.get(entry_position + 1), config.spaces.row_gap);
+        let SidebarEntry::Workspace(entry) = entry else {
+            let SidebarEntry::Group { name, collapsed } = entry else {
+                continue;
+            };
+            if y >= body.bottom() {
+                break;
+            }
+            let rect = Rect::new(body.x, y, content_width, 1);
+            let marker = if *collapsed { "▸" } else { "▾" };
+            put_text(
+                buffer,
+                rect.x,
+                rect.y,
+                rect.width.saturating_sub(1),
+                &format!(" {marker} {name}"),
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            hits.groups.push(GroupHit {
+                rect,
+                endpoint_id: ClientEndpointId::Local,
+                key: spaces_group_key(name),
+            });
+            y = y.saturating_add(1 + gap);
+            continue;
+        };
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
         };
@@ -349,9 +377,6 @@ pub(crate) fn render_sidebar(
             indented: entry.indented,
             group_toggle,
         });
-        let gap = entries
-            .get(entry_position + 1)
-            .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
         y = y.saturating_add(row_height + gap);
     }
 
@@ -455,12 +480,64 @@ pub(crate) fn render_sidebar(
     );
 }
 
+/// Collapse-toggle key for a user-defined Spaces group header.
+pub(in crate::client::shell) fn spaces_group_key(name: &str) -> String {
+    format!("spaces-group:{name}")
+}
+
+/// Vertical gap after `next` in the Spaces list: top-level entries and group
+/// headers are separated by `row_gap`, indented children are not.
+fn sidebar_entry_gap(next: Option<&SidebarEntry>, row_gap: u16) -> u16 {
+    match next {
+        Some(SidebarEntry::Workspace(entry)) => u16::from(!entry.indented) * row_gap,
+        Some(SidebarEntry::Group { .. }) => row_gap,
+        None => 0,
+    }
+}
+
 pub(crate) fn workspace_entries(
     snapshot: &ClientShellSnapshot,
     collapsed_groups: &HashSet<String>,
+    groups: &[SpaceSidebarGroup],
 ) -> Vec<WorkspaceEntry> {
+    sidebar_entries(snapshot, collapsed_groups, groups)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            SidebarEntry::Workspace(entry) => Some(entry),
+            SidebarEntry::Group { .. } => None,
+        })
+        .collect()
+}
+
+pub(crate) fn sidebar_entries(
+    snapshot: &ClientShellSnapshot,
+    collapsed_groups: &HashSet<String>,
+    groups: &[SpaceSidebarGroup],
+) -> Vec<SidebarEntry> {
+    // User-defined groups take precedence over worktree grouping for the
+    // workspaces they list; everything else keeps the existing worktree tree.
+    let mut group_of = HashMap::<usize, usize>::new();
+    let mut members_by_group = Vec::<Vec<usize>>::with_capacity(groups.len());
+    for (group_index, group) in groups.iter().enumerate() {
+        let mut group_members = Vec::new();
+        for member in &group.workspaces {
+            let resolved = snapshot.workspaces.iter().position(|workspace| {
+                workspace.workspace_id == *member || workspace.number.to_string() == *member
+            });
+            if let Some(index) = resolved {
+                if group_of.insert(index, group_index).is_none() {
+                    group_members.push(index);
+                }
+            }
+        }
+        members_by_group.push(group_members);
+    }
+
     let mut members = HashMap::<&str, Vec<usize>>::new();
     for (index, workspace) in snapshot.workspaces.iter().enumerate() {
+        if group_of.contains_key(&index) {
+            continue;
+        }
         if let Some(worktree) = &workspace.worktree {
             members.entry(&worktree.key).or_default().push(index);
         }
@@ -483,18 +560,54 @@ pub(crate) fn workspace_entries(
         .map(|(key, _)| *key)
         .collect::<HashSet<_>>();
     let mut emitted = HashSet::<&str>::new();
+    let mut emitted_groups = HashSet::<usize>::new();
     let mut entries = Vec::new();
     for (index, workspace) in snapshot.workspaces.iter().enumerate() {
+        if let Some(group_index) = group_of.get(&index).copied() {
+            if !emitted_groups.insert(group_index) {
+                continue;
+            }
+            let group = &groups[group_index];
+            let group_members = &members_by_group[group_index];
+            let collapsed = collapsed_groups.contains(&spaces_group_key(&group.name));
+            entries.push(SidebarEntry::Group {
+                name: group.name.clone(),
+                collapsed,
+            });
+            if collapsed {
+                // Mirror the worktree tree: keep the focused child visible.
+                if let Some(focused) = group_members
+                    .iter()
+                    .copied()
+                    .find(|member| snapshot.workspaces[*member].focused)
+                {
+                    entries.push(SidebarEntry::Workspace(WorkspaceEntry {
+                        index: focused,
+                        indented: true,
+                        last_child: true,
+                    }));
+                }
+                continue;
+            }
+            for (position, member) in group_members.iter().copied().enumerate() {
+                entries.push(SidebarEntry::Workspace(WorkspaceEntry {
+                    index: member,
+                    indented: true,
+                    last_child: position + 1 == group_members.len(),
+                }));
+            }
+            continue;
+        }
         let Some(worktree) = workspace
             .worktree
             .as_ref()
             .filter(|worktree| grouped.contains(worktree.key.as_str()))
         else {
-            entries.push(WorkspaceEntry {
+            entries.push(SidebarEntry::Workspace(WorkspaceEntry {
                 index,
                 indented: false,
                 last_child: false,
-            });
+            }));
             continue;
         };
         if !emitted.insert(&worktree.key) {
@@ -509,11 +622,11 @@ pub(crate) fn workspace_entries(
                 .as_ref()
                 .is_some_and(|worktree| !worktree.is_linked_worktree)
         }) {
-            entries.push(WorkspaceEntry {
+            entries.push(SidebarEntry::Workspace(WorkspaceEntry {
                 index: parent,
                 indented: false,
                 last_child: false,
-            });
+            }));
         }
         if collapsed_groups.contains(&worktree.key) {
             if let Some(active) = group_members.iter().copied().find(|member| {
@@ -524,11 +637,11 @@ pub(crate) fn workspace_entries(
                         .as_ref()
                         .is_some_and(|worktree| worktree.is_linked_worktree)
             }) {
-                entries.push(WorkspaceEntry {
+                entries.push(SidebarEntry::Workspace(WorkspaceEntry {
                     index: active,
                     indented: true,
                     last_child: true,
-                });
+                }));
             }
             continue;
         }
@@ -543,11 +656,11 @@ pub(crate) fn workspace_entries(
             })
             .collect::<Vec<_>>();
         for (child_index, child) in children.iter().enumerate() {
-            entries.push(WorkspaceEntry {
+            entries.push(SidebarEntry::Workspace(WorkspaceEntry {
                 index: *child,
                 indented: true,
                 last_child: child_index + 1 == children.len(),
-            });
+            }));
         }
     }
     entries

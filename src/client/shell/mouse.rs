@@ -543,7 +543,8 @@ impl ClientShellState {
         let collapsed_groups = self
             .collapsed_groups_for_endpoint(&self.active_endpoint_id)
             .unwrap_or(&empty_collapsed_groups);
-        let entries = render::workspace_entries(snapshot, collapsed_groups);
+        let entries =
+            render::workspace_entries(snapshot, collapsed_groups, self.local_space_groups());
         let last_hit = self
             .hits
             .workspaces
@@ -2086,6 +2087,18 @@ impl ClientShellState {
                         .saturating_add(1)
                         .min(tab_count.saturating_sub(1));
                     outcome.repaint = true;
+                    return;
+                }
+                if let Some(hit) = self
+                    .hits
+                    .groups
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                {
+                    let (endpoint_id, key) = (hit.endpoint_id.clone(), hit.key.clone());
+                    self.toggle_collapsed_group(&endpoint_id, key);
+                    outcome.repaint = true;
+                    self.persist_chrome_preferences(outcome);
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {

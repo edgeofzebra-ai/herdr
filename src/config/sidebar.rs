@@ -2,7 +2,7 @@ mod rules;
 
 pub use rules::SidebarTokenRule;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +10,7 @@ use crate::detect::Agent;
 
 const MAX_SIDEBAR_ROWS: usize = 16;
 const MAX_SIDEBAR_TOKENS_PER_ROW: usize = 16;
+const MAX_SIDEBAR_GROUPS: usize = 16;
 const DEFAULT_SIDEBAR_ROW_GAP: u16 = 0;
 
 fn deserialize_sidebar_rows<'de, D, T>(deserializer: D) -> Result<Vec<Vec<T>>, D::Error>
@@ -455,12 +456,72 @@ impl Default for AgentsSidebarConfig {
     }
 }
 
+/// A user-defined workspace group rendered as an indented tree header in the
+/// Spaces sidebar. Groups apply to the local endpoint only; remote machines
+/// keep the flat/worktree grouping behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SpaceSidebarGroup {
+    /// Header label shown for the group.
+    pub name: String,
+    /// Workspace identifiers in display order. Accepts workspace ids (`w12`)
+    /// or workspace numbers (`12`).
+    pub workspaces: Vec<String>,
+}
+
+fn deserialize_sidebar_groups<'de, D>(deserializer: D) -> Result<Vec<SpaceSidebarGroup>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let groups = Vec::<SpaceSidebarGroup>::deserialize(deserializer)?;
+    validate_sidebar_groups(&groups).map_err(serde::de::Error::custom)?;
+    Ok(groups)
+}
+
+fn validate_sidebar_groups(groups: &[SpaceSidebarGroup]) -> Result<(), String> {
+    if groups.len() > MAX_SIDEBAR_GROUPS {
+        return Err(format!(
+            "sidebar groups may contain at most {MAX_SIDEBAR_GROUPS} entries"
+        ));
+    }
+    let mut names = HashSet::new();
+    let mut members = HashSet::new();
+    for group in groups {
+        let name = group.name.trim();
+        if name.is_empty() {
+            return Err("sidebar group names must not be empty".into());
+        }
+        if !names.insert(name.to_owned()) {
+            return Err(format!("duplicate sidebar group name: {name}"));
+        }
+        if group.workspaces.is_empty() {
+            return Err(format!(
+                "sidebar group {name} must list at least one workspace"
+            ));
+        }
+        for member in &group.workspaces {
+            if member.trim().is_empty() {
+                return Err(format!(
+                    "sidebar group {name} contains an empty workspace id"
+                ));
+            }
+            if !members.insert(member.clone()) {
+                return Err(format!(
+                    "workspace {member} is listed in more than one sidebar group"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SpacesSidebarConfig {
     #[serde(deserialize_with = "deserialize_sidebar_rows")]
     pub rows: SpaceSidebarRows,
     pub row_gap: u16,
+    #[serde(deserialize_with = "deserialize_sidebar_groups")]
+    pub groups: Vec<SpaceSidebarGroup>,
 }
 
 impl Default for SpacesSidebarConfig {
@@ -471,6 +532,7 @@ impl Default for SpacesSidebarConfig {
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ],
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            groups: Vec::new(),
         }
     }
 }
@@ -723,6 +785,58 @@ rows = [[{ token = "$status", rules = [{ contains = "error", bold = true }] }]]
             assert!(
                 toml::from_str::<crate::config::Config>(&input).is_err(),
                 "accepted key {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_space_groups_are_empty() {
+        assert!(SpacesSidebarConfig::default().groups.is_empty());
+    }
+
+    #[test]
+    fn parses_user_defined_space_groups_in_order() {
+        let input = r#"
+[[ui.sidebar.spaces.groups]]
+name = "ai"
+workspaces = ["wX", "12"]
+
+[[ui.sidebar.spaces.groups]]
+name = "infra"
+workspaces = ["wB"]
+"#;
+        let config: crate::config::Config = toml::from_str(input).expect("sidebar groups config");
+        let groups = &config.ui.sidebar.spaces.groups;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "ai");
+        assert_eq!(groups[0].workspaces, vec!["wX", "12"]);
+        assert_eq!(groups[1].name, "infra");
+        assert_eq!(groups[1].workspaces, vec!["wB"]);
+    }
+
+    #[test]
+    fn rejects_invalid_space_groups() {
+        let mut cases = vec![
+            // duplicate group name
+            "[[ui.sidebar.spaces.groups]]\nname = \"ai\"\nworkspaces = [\"w1\"]\n\n[[ui.sidebar.spaces.groups]]\nname = \"ai\"\nworkspaces = [\"w2\"]\n".to_string(),
+            // empty name
+            "[[ui.sidebar.spaces.groups]]\nname = \"\"\nworkspaces = [\"w1\"]\n".to_string(),
+            // no members
+            "[[ui.sidebar.spaces.groups]]\nname = \"ai\"\nworkspaces = []\n".to_string(),
+            // member listed twice
+            "[[ui.sidebar.spaces.groups]]\nname = \"ai\"\nworkspaces = [\"w1\"]\n\n[[ui.sidebar.spaces.groups]]\nname = \"infra\"\nworkspaces = [\"w1\"]\n".to_string(),
+        ];
+        let mut too_many = String::new();
+        for index in 0..=MAX_SIDEBAR_GROUPS {
+            too_many.push_str(&format!(
+                "[[ui.sidebar.spaces.groups]]\nname = \"g{index}\"\nworkspaces = [\"w{index}\"]\n"
+            ));
+        }
+        cases.push(too_many);
+        for input in &cases {
+            assert!(
+                toml::from_str::<crate::config::Config>(input).is_err(),
+                "accepted invalid groups: {input}"
             );
         }
     }

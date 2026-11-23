@@ -1682,3 +1682,122 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
     assert!(state.visible_notification.is_none());
     assert_eq!(state.pending_notifications.len(), 1);
 }
+
+fn frame_text(frame: &crate::protocol::FrameData) -> String {
+    frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn user_defined_space_groups_render_as_indented_tree() {
+    let config: Config = toml::from_str(
+        r#"
+[[ui.sidebar.spaces.groups]]
+name = "ai"
+workspaces = ["ws_1", "ws_2"]
+"#,
+    )
+    .expect("user-defined sidebar group config");
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    let mut projected = snapshot();
+    let mut member = projected.workspaces[0].clone();
+    member.workspace_id = "ws_2".into();
+    member.active_tab_id = "tab_2".into();
+    member.number = 2;
+    member.label = "infra-box".into();
+    member.branch = None;
+    member.focused = false;
+    projected.workspaces.push(member);
+    let mut solo = projected.workspaces[0].clone();
+    solo.workspace_id = "ws_3".into();
+    solo.active_tab_id = "tab_3".into();
+    solo.number = 3;
+    solo.label = "solo-ws".into();
+    solo.branch = None;
+    solo.focused = false;
+    projected.workspaces.push(solo);
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+
+    let frame = state.compose(106, 24).expect("composed grouped frame");
+    let text = frame_text(&frame);
+    let header = text.find("▾ ai").expect("group header rendered");
+    let first_member = text.find("main").expect("first group member rendered");
+    let second_member = text
+        .find("infra-box")
+        .expect("second group member rendered");
+    let ungrouped = text.find("solo-ws").expect("ungrouped workspace rendered");
+    assert!(header < first_member, "header precedes its members");
+    assert!(first_member < second_member, "members keep config order");
+    assert!(second_member < ungrouped, "ungrouped workspaces follow");
+    assert!(text.contains("├─"), "non-last member uses ├─");
+    assert!(text.contains("└─"), "last member uses └─");
+
+    assert_eq!(state.hits.groups.len(), 1);
+    assert_eq!(state.hits.groups[0].key, "spaces-group:ai");
+    let entries = state
+        .hits
+        .workspaces
+        .iter()
+        .map(|hit| (hit.workspace_id.as_str(), hit.indented))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries,
+        vec![("ws_1", true), ("ws_2", true), ("ws_3", false)]
+    );
+
+    let toggle = state.hits.groups[0].rect;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: toggle.x + 1,
+        row: toggle.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(state.collapsed_groups.contains("spaces-group:ai"));
+    let collapsed_frame = state.compose(106, 24).expect("collapsed group frame");
+    let collapsed_text = frame_text(&collapsed_frame);
+    assert!(collapsed_text.contains("▸ ai"), "collapsed header rendered");
+    assert!(
+        !collapsed_text.contains("infra-box"),
+        "hidden member is not rendered"
+    );
+    assert!(
+        collapsed_text.contains("main"),
+        "focused member stays visible like worktree groups"
+    );
+}
+
+#[test]
+fn default_config_keeps_the_flat_spaces_list() {
+    let config = ClientShellConfig::from_config(&Config::default());
+    let mut state = ClientShellState::new(config);
+    let mut projected = snapshot();
+    let mut extra = projected.workspaces[0].clone();
+    extra.workspace_id = "ws_2".into();
+    extra.number = 2;
+    extra.label = "second".into();
+    extra.branch = None;
+    extra.focused = false;
+    projected.workspaces.push(extra);
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    let frame = state.compose(106, 24).expect("composed default frame");
+    let text = frame_text(&frame);
+    assert!(state.hits.groups.is_empty());
+    assert!(
+        !text.contains("▾") && !text.contains("└─"),
+        "no group headers or tree markers without groups"
+    );
+    assert!(
+        state.hits.workspaces.iter().all(|hit| !hit.indented),
+        "no grouping without worktrees or user groups"
+    );
+}

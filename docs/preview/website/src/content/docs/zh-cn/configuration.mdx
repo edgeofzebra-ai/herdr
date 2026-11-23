@@ -432,6 +432,20 @@ rows = [
 
 `row_gap` 分别控制 Agent 和 Space 面板中条目之间的空白终端行数。默认值为 `0`，会紧密排列条目；设为 `1` 可恢复之前的间距。它不会在 `rows` 声明的内容行之间添加间距。连续缩进的 worktree 子项仍会作为一个 Space 组紧密排列。
 
+`[ui.sidebar.spaces.groups]` 可将本地工作区分组为带缩进的树形层级:
+
+```toml
+[[ui.sidebar.spaces.groups]]
+name = "ai"
+workspaces = ["wX", "12"]
+
+[[ui.sidebar.spaces.groups]]
+name = "infra"
+workspaces = ["wB"]
+```
+
+每个分组渲染一个可点击的标题行，其成员使用与 worktree 子项相同的 `├─` / `└─` 树形前缀。成员按配置顺序排列，通过工作区 ID(`wX`)或编号(`12`)匹配；标题位于该分组首个工作区在侧边栏中出现的位置。分组仅作用于本机，对所列出的工作区优先于 worktree 分组；点击标题可折叠(折叠时仍显示获得焦点的成员)。未列入任何分组的工作区保持默认的扁平 / worktree 树形行为。分组名必须唯一，一个工作区只能属于一个分组，最多 16 个分组；违反时配置加载会报错。
+
 在 `rows_by_agent` 下为已知智能体覆盖完整的 Agent 布局：
 
 ```toml

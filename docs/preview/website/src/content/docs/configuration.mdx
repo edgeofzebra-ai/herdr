@@ -436,6 +436,20 @@ Rules work with text-valued built-ins and custom `$name` tokens in Agent rows, `
 
 `row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
 
+`[ui.sidebar.spaces.groups]` organizes local workspaces into indented tree groups:
+
+```toml
+[[ui.sidebar.spaces.groups]]
+name = "ai"
+workspaces = ["wX", "12"]
+
+[[ui.sidebar.spaces.groups]]
+name = "infra"
+workspaces = ["wB"]
+```
+
+Each group renders a clickable header row followed by its members with the same `├─` / `└─` tree prefixes used for worktree children. Members appear in configuration order and match by workspace id (`wX`) or workspace number (`12`); the header is placed where the group's first workspace appears in the sidebar. Groups apply to the local machine only, take precedence over worktree grouping for the workspaces they list, and collapse when the header is clicked (a collapsed group keeps its focused member visible). Workspaces not listed in any group keep the default flat and worktree tree behavior. Group names must be unique, a workspace may belong to only one group, and at most 16 groups are allowed; violations are rejected when loading the config.
+
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 
 ```toml
